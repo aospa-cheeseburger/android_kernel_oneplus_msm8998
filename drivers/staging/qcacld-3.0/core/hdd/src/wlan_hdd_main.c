@@ -222,8 +222,8 @@ static unsigned int dev_num = 1;
 static struct cdev wlan_hdd_state_cdev;
 static struct class *class;
 static dev_t device;
-static bool hdd_loaded = false;
-#ifndef MODULE
+static bool hdd_loaded __read_mostly = false;
+
 static struct gwlan_loader *wlan_loader;
 static ssize_t wlan_boot_cb(struct kobject *kobj,
 			    struct kobj_attribute *attr,
@@ -15381,6 +15381,8 @@ void hdd_init_start_completion(void)
 }
 
 static int hdd_driver_load(void);
+static int wlan_deinit_sysfs(void);
+
 static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
 						const char __user *user_buf,
 						size_t count,
@@ -15417,6 +15419,18 @@ static ssize_t wlan_hdd_state_ctrl_param_write(struct file *filp,
 			pr_err("%s: Failed to init hdd module\n", __func__);
 			goto exit;
 		}
+
+		/* 
+		 * Systems with Wi-Fi HAL which recognize HDD as module write to /dev/wlan directly 
+		 * without invoking wlan_boot sysfs. Furthermore, if it does not have the module, 
+		 * the system needs to wait for the callback to occur before it is able to write 
+		 * to /dev/wlan since it is only then the directory is initialized based 
+		 * on QCOM's unmodified non-module code.
+		 *
+		 * Thus, it is safe to deinit sysfs if the write to /dev occurs first instead
+		 * of sysfs being invoked first.
+		 */
+		wlan_deinit_sysfs();
 	}
 
 	if (!cds_is_driver_loaded() || cds_is_driver_recovering()) {
@@ -16418,7 +16432,6 @@ static void hdd_driver_unload(void)
 	hdd_qdf_deinit();
 }
 
-#ifndef MODULE
 /**
  * wlan_boot_cb() - Wlan boot callback
  * @kobj:      object whose directory we're creating the link in.
@@ -16437,7 +16450,7 @@ static ssize_t wlan_boot_cb(struct kobject *kobj,
 			    size_t count)
 {
 
-	if (wlan_loader->loaded_state) {
+	if (wlan_loader->loaded_state || hdd_loaded) {
 		hdd_err("wlan driver already initialized");
 		return -EALREADY;
 	}
@@ -16542,30 +16555,13 @@ static int wlan_deinit_sysfs(void)
 	return 0;
 }
 
-#endif /* MODULE */
-
-#ifdef MODULE
-/**
- * hdd_module_init() - Module init helper
- *
- * Module init helper function used by both module and static driver.
- *
- * Return: 0 for success, errno on failure
- */
-static int hdd_module_init(void)
+static int __init hdd_module_init(void)
 {
-	int ret;
+	int ret = -EINVAL;
 
 	ret = wlan_hdd_state_ctrl_param_create();
 	if (ret)
 		pr_err("wlan_hdd_state_create:%x\n", ret);
-
-	return ret;
-}
-#else
-static int __init hdd_module_init(void)
-{
-	int ret = -EINVAL;
 
 	ret = wlan_init_sysfs();
 	if (ret)
@@ -16573,28 +16569,12 @@ static int __init hdd_module_init(void)
 
 	return ret;
 }
-#endif
 
-
-#ifdef MODULE
-/**
- * hdd_module_exit() - Exit function
- *
- * This is the driver exit point (invoked when module is unloaded using rmmod)
- *
- * Return: None
- */
-static void __exit hdd_module_exit(void)
-{
-	hdd_driver_unload();
-}
-#else
 static void __exit hdd_module_exit(void)
 {
 	hdd_driver_unload();
 	wlan_deinit_sysfs();
 }
-#endif
 
 static int fwpath_changed_handler(const char *kmessage,
 				  const struct kernel_param *kp)
